@@ -6,7 +6,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.get('/', (req, res) => {
-  res.send('ArchMC Bot is actief en draait op Back4App!');
+  res.send('ArchMC Bot is actief!');
 });
 
 app.listen(PORT, () => {
@@ -15,8 +15,7 @@ app.listen(PORT, () => {
 
 // --- 2. Bot Configuraties ---
 const PASWOORD = 'pass1234';
-// Mineflayer telt vanaf index 0. Slot 14 = index 13.
-const SLOT_INDEX = 13; 
+const SLOT_INDEX = 13; // 14e vakje in het menu (telt vanaf 0)
 
 const botOptions = {
   host: 'arch.mc',
@@ -31,55 +30,65 @@ function createBot() {
   console.log('[+] Verbinden met ArchMC...');
   bot = mineflayer.createBot(botOptions);
 
+  let isSpawned = false;
+
   bot.on('spawn', () => {
-    console.log('[+] Bot is gespawned in de wereld.');
+    isSpawned = true;
+    console.log('[+] Bot is succesvol gespawned in de wereld.');
   });
 
   // --- Login & Register via Chat ---
   bot.on('message', (jsonMsg) => {
     const messageText = jsonMsg.toString();
 
-    // Registreren indien de server erom vraagt
-    if (messageText.includes('/register')) {
-      console.log('[->] /register commando uitvoeren...');
-      bot.chat(`/register ${PASWOORD} ${PASWOORD}`);
-    } 
-    // Inloggen indien de server erom vraagt
-    else if (messageText.includes('/login')) {
-      console.log('[->] /login commando uitvoeren...');
-      bot.chat(`/login ${PASWOORD}`);
+    // Alleen reageren als de bot al daadwerkelijk gespawned is
+    if (!isSpawned) return;
 
-      // 10 seconden wachten na login om rechtermuisklik uit te voeren
+    if (messageText.includes('/register')) {
+      console.log('[->] /register commando klaarzetten...');
+      // Wacht 1 seconde met versturen om te voorkomen dat de server dit als spam ziet
       setTimeout(() => {
-        console.log('[->] 10 seconden verstreken. Rechtermuisklik uitvoeren...');
-        bot.activateItem(); // Voert rechtermuisklik uit
-      }, 10000);
+        if (bot) bot.chat(`/register ${PASWOORD} ${PASWOORD}`);
+      }, 1000);
+    } 
+    else if (messageText.includes('/login')) {
+      console.log('[->] /login commando klaarzetten...');
+      setTimeout(() => {
+        if (bot) {
+          bot.chat(`/login ${PASWOORD}`);
+
+          // 10 seconden na login de rechtermuisklik uitvoeren
+          setTimeout(() => {
+            console.log('[->] Rechtermuisklik uitvoeren...');
+            bot.activateItem();
+          }, 10000);
+        }
+      }, 1000);
     }
   });
 
-  // --- Menu Interactie (Chest / GUI Menu) ---
+  // --- Menu Interactie (Chest GUI) ---
   bot.on('windowOpen', async (window) => {
-    console.log(`[+] GUI Menu geopend (Titel: "${window.title}"). Slot ${SLOT_INDEX + 1} (index ${SLOT_INDEX}) aanklikken...`);
+    console.log(`[+] GUI Menu geopend: "${window.title}". Slot ${SLOT_INDEX + 1} aanklikken...`);
 
     try {
-      // Klik op het 14e vakje (index 13)
       await bot.clickWindow(SLOT_INDEX, 0, 0);
-      console.log('[+] Op het vakje geklikt!');
+      console.log('[+] Op het 14e vakje geklikt!');
 
-      // Wacht 2 seconden en stuur /afk
       setTimeout(() => {
         console.log('[->] /afk versturen...');
         bot.chat('/afk');
       }, 2000);
     } catch (err) {
-      console.error('[-] Fout bij het aanklikken in het menu:', err.message);
+      console.error('[-] Fout bij aanklikken in menu:', err.message);
     }
   });
 
   // --- Reconnect Logica ---
   bot.on('end', (reason) => {
-    console.log(`[-] Verbinding verbroken: ${reason}. Herverbinden over 10 seconden...`);
-    setTimeout(createBot, 10000);
+    isSpawned = false;
+    console.log(`[-] Verbinding verbroken: ${reason}. Herverbinden over 12 seconden...`);
+    setTimeout(createBot, 12000);
   });
 
   bot.on('error', (err) => {
@@ -87,5 +96,4 @@ function createBot() {
   });
 }
 
-// Start de bot
 createBot();
