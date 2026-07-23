@@ -1,7 +1,7 @@
 {
   "name": "archmc-afk-bot",
   "version": "1.0.0",
-  "description": "24/7 AFK Bot voor ArchMC via Render",
+  "description": "AFK Bot voor ArchMC op Back4App",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
