@@ -1,13 +1,14 @@
 {
   "name": "archmc-afk-bot",
   "version": "1.0.0",
-  "description": "24/7 AFK Bot voor ArchMC",
+  "description": "ArchMC AFK Bot met Proxy",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "express": "^4.18.2",
-    "mineflayer": "^4.20.0"
+    "mineflayer": "^4.20.0",
+    "socks": "^2.8.0"
   }
 }
