@@ -9,8 +9,7 @@ app.get('/', (req, res) => {
   res.json({
     status: 'online',
     bot: bot ? 'connected' : 'disconnected',
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+    uptime: process.uptime()
   });
 });
 
@@ -35,11 +34,11 @@ const CONFIG = {
 
 let bot = null;
 let reconnectTimer = null;
-let loginAttempts = 0;
-let isLoggedIn = false;
 let isSpawned = false;
+let isLoggedIn = false;
+let keepAliveInterval = null;
 
-// --- 3. Bot Creatie ---
+// --- 3. Bot Creatie (ZONDER PROXY) ---
 function createBot() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -51,11 +50,16 @@ function createBot() {
     bot = null;
   }
 
+  if (keepAliveInterval) {
+    clearInterval(keepAliveInterval);
+    keepAliveInterval = null;
+  }
+
   isSpawned = false;
   isLoggedIn = false;
   
   console.log('🔄 Verbinden met ArchMC...');
-  console.log(`📍 Host: ${CONFIG.host}:${CONFIG.port}`);
+  console.log(`📍 ${CONFIG.host}:${CONFIG.port}`);
 
   try {
     bot = mineflayer.createBot({
@@ -63,147 +67,114 @@ function createBot() {
       port: CONFIG.port,
       username: CONFIG.username,
       version: CONFIG.version,
-      checkTimeoutInterval: 60000,
+      checkTimeoutInterval: 120000, // 2 minuten timeout
       logErrors: true
     });
 
-    // --- Bot Event Handlers ---
-    
-    // Error handler
+    // --- Events ---
     bot.on('error', (err) => {
-      console.error('❌ Bot error:', err.message);
-      if (err.message.includes('ECONNRESET') || 
-          err.message.includes('ETIMEDOUT') ||
-          err.message.includes('socketClosed')) {
-        handleReconnect();
-      }
+      console.error('❌ Error:', err.message);
     });
 
-    // Spawn - DIRECT ACTIE ONDERNEMEN
     bot.once('spawn', () => {
       if (isSpawned) return;
       isSpawned = true;
       console.log('✅ Bot is gespawned!');
-      console.log(`📍 Bot: ${bot.username}`);
-      loginAttempts = 0;
+      console.log(`📍 ${bot.username}`);
       
-      // STAP 1: Direct een bericht sturen om verbinding actief te houden
+      // DIRECT ACTIE: Stuur meteen berichten
+      
+      // 1. Hallo bericht (na 1 sec)
       setTimeout(() => {
         if (bot && bot.chat) {
-          bot.chat('Hallo! Ik ben er!');
-          console.log('💬 Hallo bericht verzonden');
+          bot.chat('Hallo!');
+          console.log('💬 Hallo');
         }
       }, 1000);
 
-      // STAP 2: Wacht 2 seconden en stuur login
+      // 2. Login (na 2 sec)
       setTimeout(() => {
         if (bot && bot.chat && !isLoggedIn) {
           bot.chat(`/login ${CONFIG.password}`);
-          console.log('🔑 Login verzonden');
+          console.log('🔑 Login');
         }
       }, 2000);
 
-      // STAP 3: Wacht 5 seconden en stuur AFK
+      // 3. AFK (na 4 sec)
       setTimeout(() => {
         if (bot && bot.chat) {
           bot.chat('/afk');
-          console.log('💤 /afk verzonden');
+          console.log('💤 AFK');
         }
-      }, 5000);
+      }, 4000);
 
-      // STAP 4: Start keep-alive berichten
-      setInterval(() => {
+      // 4. Keep-alive: elke 20 seconden
+      keepAliveInterval = setInterval(() => {
         if (bot && bot.chat && isSpawned) {
-          const messages = [
-            '🤖 AFK bot draait!',
-            '💤 AFK modus actief',
-            '👋 Hallo allemaal!',
-            '🌟 Bot is online'
-          ];
-          const msg = messages[Math.floor(Math.random() * messages.length)];
-          bot.chat(msg);
-          console.log(`💬 Keep-alive: "${msg}"`);
+          const msgs = ['🤖', '💤', '👋', '🌟', '🎮'];
+          bot.chat(msgs[Math.floor(Math.random() * msgs.length)]);
+          console.log('💬 Ping');
         }
-      }, 30000); // Elke 30 seconden
+      }, 20000);
     });
 
-    // --- Login detectie ---
+    // --- Chat ---
     bot.on('message', (jsonMsg) => {
-      const messageText = jsonMsg.toString();
-      console.log(`💬 Chat: ${messageText}`);
+      const msg = jsonMsg.toString();
+      console.log(`💬 ${msg}`);
 
       if (!isSpawned) return;
 
-      // Login succesvol
-      if (messageText.includes('succesvol ingelogd') || 
-          messageText.includes('successfully logged in') ||
-          messageText.includes('Welcome') ||
-          messageText.includes('je bent nu ingelogd')) {
+      // Login success
+      if (msg.includes('succesvol ingelogd') || 
+          msg.includes('Welcome') ||
+          msg.includes('logged in')) {
         isLoggedIn = true;
-        console.log('✅ Bot is succesvol ingelogd!');
+        console.log('✅ Ingelogd!');
         
-        // Direct AFK sturen na inloggen
         setTimeout(() => {
-          if (bot && bot.chat) {
-            bot.chat('/afk');
-            console.log('💤 /afk verzonden (na login)');
-          }
-        }, 3000);
+          if (bot && bot.chat) bot.chat('/afk');
+        }, 2000);
       }
 
-      // Register detectie
-      if (messageText.includes('/register') && !isLoggedIn) {
-        console.log('📝 Register gedetecteerd, sturen...');
+      // Register
+      if (msg.includes('/register') && !isLoggedIn) {
         setTimeout(() => {
           if (bot && bot.chat) {
             bot.chat(`/register ${CONFIG.password} ${CONFIG.password}`);
-            console.log('✅ Register verzonden');
+            console.log('📝 Register');
           }
         }, 1000);
       }
 
       // Login prompt
-      if (messageText.includes('/login') && !isLoggedIn) {
-        console.log('🔑 Login prompt gedetecteerd, sturen...');
+      if (msg.includes('/login') && !isLoggedIn) {
         setTimeout(() => {
           if (bot && bot.chat) {
             bot.chat(`/login ${CONFIG.password}`);
-            console.log('✅ Login verzonden');
+            console.log('🔑 Login');
           }
         }, 1000);
-      }
-
-      // AFK bevestiging
-      if (messageText.includes('AFK') || messageText.includes('afk')) {
-        console.log('💤 AFK bevestigd!');
       }
     });
 
     // --- GUI ---
     bot.on('windowOpen', async (window) => {
-      console.log(`📂 GUI geopend: "${window.title}"`);
+      console.log(`📂 GUI: "${window.title}"`);
       
       try {
-        // Klik op verschillende slots om te zien wat werkt
-        const slots = [13, 12, 14, 10, 0];
-        for (const slot of slots) {
+        // Probeer verschillende slots
+        for (const slot of [13, 12, 14, 10, 0]) {
           try {
             await bot.clickWindow(slot, 0, 0);
-            console.log(`✅ Geklikt op slot ${slot + 1}`);
+            console.log(`✅ Slot ${slot+1}`);
             break;
-          } catch (e) {
-            // Probeer volgende slot
-          }
+          } catch (e) {}
         }
         
-        // Stuur AFK na klikken
         setTimeout(() => {
-          if (bot && bot.chat) {
-            bot.chat('/afk');
-            console.log('💤 /afk verzonden (via GUI)');
-          }
+          if (bot && bot.chat) bot.chat('/afk');
         }, 1000);
-        
       } catch (err) {
         console.error('❌ GUI error:', err.message);
       }
@@ -213,89 +184,68 @@ function createBot() {
     bot.on('kicked', (reason) => {
       isSpawned = false;
       isLoggedIn = false;
-      console.log(`👢 Gekicked: ${reason}`);
+      console.log(`👢 Kicked: ${reason}`);
       
-      // Als het VPN detectie is, wacht langer
-      if (reason.includes('VPN') || reason.includes('vpn')) {
-        console.log('⏰ VPN detectie, wacht 60 seconden...');
-        setTimeout(() => {
-          handleReconnect();
-        }, 60000);
-      } else {
-        handleReconnect();
-      }
+      // Bij VPN detectie, wacht langer
+      const delay = reason.includes('VPN') ? 60000 : 10000;
+      console.log(`⏰ Wacht ${delay/1000}s`);
+      
+      reconnectTimer = setTimeout(createBot, delay);
     });
 
     // --- End ---
     bot.on('end', (reason) => {
       isSpawned = false;
       isLoggedIn = false;
-      console.log(`🔴 Verbinding verbroken: ${reason}`);
-      handleReconnect();
+      console.log(`🔴 Disconnected: ${reason}`);
+      
+      reconnectTimer = setTimeout(createBot, 5000);
     });
 
     // --- Resource Pack ---
     bot.on('resourcePack', (pack) => {
-      console.log('📦 Resource pack ontvangen, accepteren...');
+      console.log('📦 Resource pack');
       bot.acceptResourcePack();
     });
 
   } catch (error) {
-    console.error('❌ Fout bij creëren bot:', error.message);
-    handleReconnect();
+    console.error('❌ Fout:', error.message);
+    reconnectTimer = setTimeout(createBot, 10000);
   }
 }
 
-// --- 4. Reconnect ---
-function handleReconnect() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  if (bot) {
-    try { bot.end(); } catch (e) {}
-    bot = null;
-  }
-
-  const delay = 5000;
-  console.log(`🔄 Herverbinden over ${delay/1000}s...`);
-  
-  reconnectTimer = setTimeout(() => {
-    createBot();
-  }, delay);
-}
-
-// --- 5. Health Check ---
+// --- 4. Health Check ---
 setInterval(() => {
   if (!bot || !bot.entity || !isSpawned) {
-    console.log('⚠️ Bot niet actief, herstarten...');
-    handleReconnect();
+    console.log('⚠️ Bot niet actief, herstart...');
+    if (!reconnectTimer) {
+      createBot();
+    }
   } else {
-    console.log('✅ Bot is gezond');
+    console.log('✅ Bot actief');
   }
 }, 60000);
 
-// --- 6. Start ---
-console.log('🚀 ArchMC Bot starting...');
-console.log(`📝 Bot: ${CONFIG.username}`);
-console.log(`🌐 Server: ${CONFIG.host}:${CONFIG.port}`);
+// --- 5. Start ---
+console.log('🚀 ArchMC Bot');
+console.log(`📝 ${CONFIG.username}`);
+console.log(`🌐 ${CONFIG.host}:${CONFIG.port}`);
 
-setTimeout(() => {
-  createBot();
-}, 2000);
+setTimeout(createBot, 2000);
 
-// --- 7. Cleanup ---
+// --- 6. Cleanup ---
 process.on('SIGINT', () => {
-  console.log('🛑 Shutting down...');
-  if (bot) { bot.end(); bot = null; }
+  console.log('🛑 Stopping...');
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (bot) { bot.end(); }
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
-  console.log('🛑 Shutting down...');
-  if (bot) { bot.end(); bot = null; }
+  console.log('🛑 Stopping...');
+  if (keepAliveInterval) clearInterval(keepAliveInterval);
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (bot) { bot.end(); }
   process.exit(0);
 });
