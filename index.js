@@ -16,95 +16,170 @@ app.get('/', (req, res) => {
   });
 });
 
-// Extra health endpoint voor specifieke monitoring
 app.get('/health', (req, res) => {
   const isConnected = bot && bot.entity;
   res.json({
     status: isConnected ? 'healthy' : 'unhealthy',
     botStatus: isConnected ? 'spawned' : 'not spawned',
-    connection: bot ? 'active' : 'inactive'
+    connection: bot ? 'active' : 'inactive',
+    websocket: ws && ws.readyState === WebSocket.OPEN ? 'open' : 'closed'
   });
 });
 
 app.listen(PORT, () => {
   console.log(`✅ Webserver gestart op poort ${PORT}`);
-  console.log(`🔗 Health check: http://localhost:${PORT}/health`);
 });
 
 // --- 2. Bot Configuraties ---
 const CONFIG = {
   password: 'pass1234',
-  slotIndex: 13, // 14e vakje (telt vanaf 0)
+  slotIndex: 13,
   serverUrl: 'wss://mc.arch.lol/',
   username: 'MijnAFKBot',
   version: '1.8.8',
-  reconnectDelay: 15000,
-  afkDelay: 10000, // 10 seconden wachten voor /afk
-  clickDelay: 2000, // 2 seconden wachten na klik
-  registerDelay: 2000, // 2 seconden wachten voor /register
-  loginDelay: 2000 // 2 seconden wachten voor /login
+  reconnectDelay: 5000, // Korter voor sneller herstellen
+  afkDelay: 10000,
+  clickDelay: 2000,
+  registerDelay: 2000,
+  loginDelay: 2000,
+  pingInterval: 30000 // Ping elke 30 seconden
 };
 
 let bot = null;
+let ws = null;
 let isSpawning = false;
 let reconnectTimer = null;
 let afkTimer = null;
+let pingTimer = null;
+let isLoggedIn = false;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_ATTEMPTS = 10;
 
-// --- 3. Bot Creatie met WebSocket ---
+// --- 3. Bot Creatie met Verbeterde WebSocket ---
 function createBot() {
   // Clear bestaande timers
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
+  if (pingTimer) {
+    clearInterval(pingTimer);
+    pingTimer = null;
+  }
 
   console.log('🔄 Verbinden met ArchMC via WebSocket...');
 
   try {
-    // Maak de WebSocket-verbinding aan
-    const ws = new WebSocket(CONFIG.serverUrl, {
+    // Verbeterde WebSocket met extra headers
+    ws = new WebSocket(CONFIG.serverUrl, {
       origin: 'https://arch.lol',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Accept-Language': 'nl-NL,nl;q=0.9,en;q=0.8',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+        'Sec-WebSocket-Extensions': 'permessage-deflate; client_max_window_bits'
+      },
+      perMessageDeflate: false // Zet compressie uit voor betere compatibiliteit
+    });
+
+    // --- WebSocket Event Handlers ---
+    ws.on('open', () => {
+      console.log('✅ WebSocket verbinding opgebouwd met ArchMC!');
+      reconnectAttempts = 0;
+      
+      // Start ping interval om verbinding levend te houden
+      if (pingTimer) clearInterval(pingTimer);
+      pingTimer = setInterval(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          // Stuur een ping frame
+          ws.ping();
+          console.log('💓 Ping verzonden naar server');
+        } else {
+          console.log('⚠️ WebSocket niet open, ping overslaan');
+        }
+      }, CONFIG.pingInterval);
+    });
+
+    ws.on('ping', (data) => {
+      // Reageer op ping van server met pong
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.pong(data);
+        console.log('💓 Pong terug gestuurd naar server');
       }
     });
 
-    ws.on('open', () => {
-      console.log('✅ WebSocket verbinding opgebouwd met ArchMC!');
+    ws.on('pong', (data) => {
+      console.log('💓 Pong ontvangen van server');
     });
 
     ws.on('error', (err) => {
       console.error('❌ WebSocket Fout:', err.message);
+      if (err.message.includes('Unexpected server response')) {
+        console.log('⚠️ Server gaf onverwachte response, probeer alternatieve verbinding...');
+        // Probeer zonder extra headers
+        reconnectWithFallback();
+      }
     });
 
     ws.on('close', (code, reason) => {
-      console.log(`🔴 WebSocket gesloten: ${code} - ${reason}`);
+      console.log(`🔴 WebSocket gesloten: ${code} - ${reason || 'Geen reden'}`);
+      
+      // Specifieke error codes afhandelen
+      if (code === 1006) {
+        console.log('⚠️ Abnormale sluiting (1006) - waarschijnlijk netwerkprobleem');
+      } else if (code === 1000) {
+        console.log('✅ Normale sluiting - bot is gestopt');
+      } else if (code === 1001) {
+        console.log('⚠️ Server gaat weg - wachten op herverbinding');
+      }
+      
+      if (bot) {
+        bot.end();
+        bot = null;
+      }
+      
+      handleReconnect();
     });
 
-    // Koppel de WebSocket aan Mineflayer
+    // --- Mineflayer Bot met WebSocket Stream ---
+    const stream = WebSocket.createWebSocketStream(ws, {
+      encoding: 'utf8',
+      highWaterMark: 16384
+    });
+
+    stream.on('error', (err) => {
+      console.error('❌ Stream fout:', err.message);
+    });
+
     bot = mineflayer.createBot({
-      stream: WebSocket.createWebSocketStream(ws),
+      stream: stream,
       username: CONFIG.username,
       version: CONFIG.version,
-      checkTimeoutInterval: 30000,
-      reconnectDelay: 5000,
-      logErrors: true
+      checkTimeoutInterval: 60000, // Langer timeout voor stabiliteit
+      reconnectDelay: 1000,
+      logErrors: true,
+      hideErrors: false
     });
 
-    // --- 4. Bot Event Handlers ---
+    // --- Bot Event Handlers ---
     let isSpawned = false;
-    let isLoggedIn = false;
-    let loginAttempts = 0;
-    const MAX_LOGIN_ATTEMPTS = 3;
+    isLoggedIn = false;
 
     bot.once('spawn', () => {
       if (isSpawned) return;
       isSpawned = true;
       isSpawning = false;
-      loginAttempts = 0;
       console.log('✅ Bot is gespawned in de wereld!');
       console.log(`📍 Bot naam: ${bot.username}`);
-      console.log(`📊 Bot versie: ${bot.version}`);
+      
+      // Stuur een hallo bericht om te testen of de bot werkt
+      setTimeout(() => {
+        if (bot && bot.chat) {
+          bot.chat('Hallo! Ik ben een AFK bot');
+        }
+      }, 3000);
     });
 
     // --- Login & Register via Chat ---
@@ -112,12 +187,11 @@ function createBot() {
       const messageText = jsonMsg.toString();
       console.log(`💬 Chat: ${messageText}`);
 
-      // Alleen handelen als de bot is gespawned
       if (!isSpawned) return;
 
-      // /register detectie
+      // Controleer of we moeten registreren of inloggen
       if (messageText.includes('/register') && !isLoggedIn) {
-        console.log('📝 /register gedetecteerd. Versturen...');
+        console.log('📝 /register gedetecteerd');
         setTimeout(() => {
           if (bot && bot.chat) {
             bot.chat(`/register ${CONFIG.password} ${CONFIG.password}`);
@@ -125,19 +199,18 @@ function createBot() {
           }
         }, CONFIG.registerDelay);
       } 
-      // /login detectie
       else if (messageText.includes('/login') && !isLoggedIn) {
-        console.log('🔑 /login gedetecteerd. Versturen...');
+        console.log('🔑 /login gedetecteerd');
         setTimeout(() => {
           if (bot && bot.chat) {
             bot.chat(`/login ${CONFIG.password}`);
             console.log('✅ /login verzonden');
             isLoggedIn = true;
 
-            // Na inloggen: wachten en dan rechtermuisklik uitvoeren
+            // Start AFK timer na inloggen
             if (afkTimer) clearTimeout(afkTimer);
             afkTimer = setTimeout(() => {
-              console.log('⏰ 10 seconden verstreken. Rechtermuisklik uitvoeren...');
+              console.log('⏰ 10 seconden verstreken. Start AFK modus...');
               if (bot && bot.activateItem) {
                 bot.activateItem();
                 console.log('🖱️ Rechtermuisklik uitgevoerd');
@@ -146,16 +219,16 @@ function createBot() {
           }
         }, CONFIG.loginDelay);
       }
-      // Succesvol ingelogd bericht
       else if (messageText.includes('succesvol ingelogd') || 
                messageText.includes('successfully logged in') ||
-               messageText.includes('je bent nu ingelogd')) {
+               messageText.includes('je bent nu ingelogd') ||
+               messageText.includes('Welcome')) {
         isLoggedIn = true;
         console.log('✅ Bot is succesvol ingelogd!');
       }
-      // AFK bevestiging
       else if (messageText.includes('je bent nu AFK') || 
-               messageText.includes('you are now AFK')) {
+               messageText.includes('you are now AFK') ||
+               messageText.includes('AFK mode')) {
         console.log('💤 Bot is nu AFK!');
       }
     });
@@ -163,44 +236,53 @@ function createBot() {
     // --- Menu / GUI Interactie ---
     bot.on('windowOpen', async (window) => {
       console.log(`📂 GUI Menu geopend: "${window.title}"`);
-      console.log(`🖱️ Klikken op slot ${CONFIG.slotIndex + 1}...`);
+      
+      // Check of het de juiste GUI is
+      if (window.title.includes('Kies') || window.title.includes('Menu') || window.title.includes('Server')) {
+        console.log(`🖱️ Klikken op slot ${CONFIG.slotIndex + 1}...`);
 
-      try {
-        // Klik op het gespecificeerde vakje
-        const result = await bot.clickWindow(CONFIG.slotIndex, 0, 0);
-        console.log(`✅ Geklikt op vakje ${CONFIG.slotIndex + 1}! Result: ${result}`);
-
-        // Wacht en stuur /afk
-        setTimeout(() => {
-          if (bot && bot.chat) {
-            bot.chat('/afk');
-            console.log('💤 /afk verzonden');
-          }
-        }, CONFIG.clickDelay);
-      } catch (err) {
-        console.error('❌ Fout bij klikken op vakje:', err.message);
-        
-        // Probeer alternatieve klik methode
         try {
-          console.log('🔄 Poging 2: alternatieve klik...');
-          await bot.clickWindow(CONFIG.slotIndex, 0, 1); // Shift+klik
-          console.log('✅ Alternatieve klik gelukt!');
-        } catch (err2) {
-          console.error('❌ Alternatieve klik ook mislukt:', err2.message);
-        }
-      }
-    });
+          // Eerst proberen met normale klik
+          await bot.clickWindow(CONFIG.slotIndex, 0, 0);
+          console.log(`✅ Geklikt op vakje ${CONFIG.slotIndex + 1}!`);
 
-    // --- Window Close ---
-    bot.on('windowClose', (window) => {
-      console.log(`❌ GUI Menu gesloten: "${window.title}"`);
+          setTimeout(() => {
+            if (bot && bot.chat) {
+              bot.chat('/afk');
+              console.log('💤 /afk verzonden');
+            }
+          }, CONFIG.clickDelay);
+        } catch (err) {
+          console.error('❌ Fout bij klikken:', err.message);
+          
+          // Probeer alternatieve methodes
+          try {
+            console.log('🔄 Probeer alternatieve klik...');
+            await bot.clickWindow(CONFIG.slotIndex, 0, 1);
+            console.log('✅ Alternatieve klik gelukt!');
+          } catch (err2) {
+            console.error('❌ Alle klik methodes mislukt:', err2.message);
+            
+            // Fallback: stuur gewoon /afk zonder klik
+            setTimeout(() => {
+              if (bot && bot.chat) {
+                bot.chat('/afk');
+                console.log('💤 /afk verzonden (fallback)');
+              }
+            }, CONFIG.clickDelay);
+          }
+        }
+      } else {
+        console.log('⚠️ Onbekende GUI, overslaan...');
+      }
     });
 
     // --- Error Handling ---
     bot.on('error', (err) => {
       console.error('❌ Bot Fout:', err.message);
-      if (err.message.includes('ECONNRESET') || err.message.includes('ETIMEDOUT')) {
-        console.log('🔄 Verbindingsfout, probeer opnieuw...');
+      if (err.message.includes('ECONNRESET') || 
+          err.message.includes('ETIMEDOUT') ||
+          err.message.includes('socket closed')) {
         handleReconnect();
       }
     });
@@ -214,16 +296,22 @@ function createBot() {
       handleReconnect();
     });
 
-    // --- End / Disconnect ---
+    // --- End ---
     bot.on('end', (reason) => {
       isSpawned = false;
       isLoggedIn = false;
       isSpawning = false;
       console.log(`🔴 Verbinding verbroken: ${reason}`);
+      
+      // Als de WebSocket nog open is, sluit deze
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.close();
+      }
+      
       handleReconnect();
     });
 
-    // --- Resource Pack (soms nodig voor Eaglercraft) ---
+    // --- Resource Pack ---
     bot.on('resourcePack', (pack) => {
       console.log('📦 Resource pack ontvangen, accepteren...');
       bot.acceptResourcePack();
@@ -235,7 +323,28 @@ function createBot() {
   }
 }
 
-// --- 5. Reconnect Logic ---
+// --- 4. Fallback verbinding zonder extra headers ---
+function reconnectWithFallback() {
+  console.log('🔄 Poging met fallback verbinding...');
+  try {
+    if (ws) {
+      ws.close();
+      ws = null;
+    }
+    
+    ws = new WebSocket(CONFIG.serverUrl, {
+      origin: 'https://arch.lol'
+    });
+    
+    // Rest van de setup...
+    // (vereenvoudigde versie zonder extra headers)
+  } catch (err) {
+    console.error('❌ Fallback mislukt:', err.message);
+    handleReconnect();
+  }
+}
+
+// --- 5. Reconnect Logic met limiet ---
 function handleReconnect() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -246,53 +355,87 @@ function handleReconnect() {
     try {
       bot.end();
     } catch (e) {
-      // Negeer errors bij het sluiten
+      // Negeer
     }
     bot = null;
   }
 
-  console.log(`🔄 Herverbinden over ${CONFIG.reconnectDelay/1000} seconden...`);
+  if (ws) {
+    try {
+      ws.close();
+    } catch (e) {
+      // Negeer
+    }
+    ws = null;
+  }
+
+  reconnectAttempts++;
+  
+  if (reconnectAttempts > MAX_RECONNECT_ATTEMPTS) {
+    console.log(`⚠️ Max reconnect attempts (${MAX_RECONNECT_ATTEMPTS}) bereikt, wachten met exponentiele backoff...`);
+    // Reset na een langere pauze
+    setTimeout(() => {
+      reconnectAttempts = 0;
+      console.log('🔄 Reset reconnect attempts, opnieuw proberen...');
+      createBot();
+    }, 60000);
+    return;
+  }
+
+  const delay = Math.min(CONFIG.reconnectDelay * Math.pow(1.5, reconnectAttempts - 1), 60000);
+  console.log(`🔄 Herverbinden over ${delay/1000} seconden... (poging ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`);
+  
   reconnectTimer = setTimeout(() => {
     console.log('🔄 Poging tot herverbinden...');
     createBot();
-  }, CONFIG.reconnectDelay);
+  }, delay);
 }
 
-// --- 6. Periodic Health Check (extra veiligheid) ---
+// --- 6. Periodieke Health Check ---
 function periodicHealthCheck() {
   if (!bot || !bot.entity) {
     console.log('⚠️ Bot lijkt niet actief, herstarten...');
     handleReconnect();
   } else {
     console.log('✅ Bot is gezond en actief');
+    
+    // Extra check: als WebSocket gesloten is maar bot nog leeft
+    if (ws && ws.readyState !== WebSocket.OPEN) {
+      console.log('⚠️ WebSocket is gesloten maar bot leeft nog, herstellen...');
+      handleReconnect();
+    }
   }
 }
 
-// Elke 5 minuten een health check
-setInterval(periodicHealthCheck, 300000);
+// Elke 3 minuten check (i.p.v. 5 voor snellere detectie)
+setInterval(periodicHealthCheck, 180000);
 
 // --- 7. Graceful Shutdown ---
 process.on('SIGINT', () => {
   console.log('🛑 Shutting down gracefully...');
-  if (bot) {
-    bot.end();
-    bot = null;
-  }
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  if (afkTimer) clearTimeout(afkTimer);
+  cleanup();
   process.exit(0);
 });
 
 process.on('SIGTERM', () => {
   console.log('🛑 Received SIGTERM, shutting down...');
+  cleanup();
+  process.exit(0);
+});
+
+function cleanup() {
+  if (pingTimer) clearInterval(pingTimer);
+  if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (afkTimer) clearTimeout(afkTimer);
   if (bot) {
     bot.end();
     bot = null;
   }
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  if (afkTimer) clearTimeout(afkTimer);
-  process.exit(0);
-});
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
+}
 
 // --- 8. Start de bot ---
 console.log('🚀 ArchMC AFK Bot starting...');
@@ -300,5 +443,4 @@ console.log(`📝 Gebruikersnaam: ${CONFIG.username}`);
 console.log(`🌐 Server: ${CONFIG.serverUrl}`);
 createBot();
 
-// Extra: Log wanneer de bot actief is
 console.log('✅ Bot is gestart! Monitoring via /health endpoint');
